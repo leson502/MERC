@@ -14,6 +14,7 @@ from dataset.VGGSoundDataset import VGGSound
 from dataset.dataset import AVDataset
 from models.basic_model import AVClassifier
 from utils.utils import setup_seed, weight_init
+from tqdm import tqdm
 
 
 def get_arguments():
@@ -26,7 +27,6 @@ def get_arguments():
     parser.add_argument('--fusion_method', default='concat', type=str,
                         choices=['sum', 'concat', 'gated', 'film'])
     parser.add_argument('--fps', default=1, type=int)
-    parser.add_argument('--use_video_frames', default=3, type=int)
     parser.add_argument('--audio_path', default='/home/hudi/data/CREMA-D/AudioWAV', type=str)
     parser.add_argument('--visual_path', default='/home/hudi/data/CREMA-D/', type=str)
 
@@ -50,17 +50,13 @@ def get_arguments():
 
 def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler, writer=None):
     criterion = nn.CrossEntropyLoss()
-    softmax = nn.Softmax(dim=1)
-    relu = nn.ReLU(inplace=True)
-    tanh = nn.Tanh()
 
     model.train()
     print("Start training ... ")
 
     _loss = 0
 
-    for step, (spec, image, label) in enumerate(dataloader):
-
+    for step, (spec, image, label) in tqdm(enumerate(dataloader), desc='Epoch: {}: '.format(epoch)):
         #pdb.set_trace()
         spec = spec.to(device)
         image = image.to(device)
@@ -130,50 +126,34 @@ def main():
     print(args)
 
     setup_seed(args.random_seed)
-    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
-
-    if not torch.cuda.is_available():
-        device = "cpu"
-    else:
-        device = "cuda"
-
+ 
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
     model = AVClassifier(args)
-
     model.apply(weight_init)
     model.to(device)
 
     optimizer = optim.SGD(model.parameters(), lr=args.learning_rate, momentum=0.9, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.lr_decay_step, args.lr_decay_ratio)
 
-    if args.dataset == 'VGGSound':
-        train_dataset = VGGSound(args, mode='train')
-        test_dataset = VGGSound(args, mode='test')
-    elif args.dataset == 'KineticSound':
-        train_dataset = AVDataset(args, mode='train')
-        test_dataset = AVDataset(args, mode='test')
-    elif args.dataset == 'CREMAD':
+    if args.dataset == 'CREMAD':
         train_dataset = CramedDataset(args, mode='train')
         test_dataset = CramedDataset(args, mode='test')
-    elif args.dataset == 'AVE':
-        train_dataset = AVDataset(args, mode='train')
-        test_dataset = AVDataset(args, mode='test')
     else:
         raise NotImplementedError('Incorrect dataset name {}! '
                                   'Only support VGGSound, KineticSound and CREMA-D for now!'.format(args.dataset))
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size,
-                                  shuffle=True, num_workers=32, pin_memory=True)
+                                  shuffle=True, pin_memory=True)
 
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size,
-                                 shuffle=False, num_workers=32, pin_memory=True)
+                                 shuffle=False, pin_memory=True)
 
     if args.train:
 
         best_acc = 0.0
 
         for epoch in range(args.epochs):
-
-            print('Epoch: {}: '.format(epoch))
 
             if args.use_tensorboard:
 
@@ -202,19 +182,13 @@ def main():
                 if not os.path.exists(args.ckpt_path):
                     os.mkdir(args.ckpt_path)
 
-                model_name = 'best_model_of_dataset_{}_{}_alpha_{}_' \
-                             'optimizer_{}_modulate_starts_{}_ends_{}_' \
+                model_name = 'best_model_of_dataset_{}_' \
+                             'optimizer_{}_' \
                              'epoch_{}_acc_{}.pth'.format(args.dataset,
-                                                          args.modulation,
-                                                          args.alpha,
                                                           args.optimizer,
-                                                          args.modulation_starts,
-                                                          args.modulation_ends,
                                                           epoch, acc)
 
                 saved_dict = {'saved_epoch': epoch,
-                              'modulation': args.modulation,
-                              'alpha': args.alpha,
                               'fusion': args.fusion_method,
                               'acc': acc,
                               'model': model.state_dict(),
@@ -229,17 +203,10 @@ def main():
             else:
                 print("Loss: {:.3f}, Acc: {:.3f}, Best Acc: {:.3f}".format(batch_loss, acc, best_acc))
     else:
-        # first load trained model
         loaded_dict = torch.load(args.ckpt_path)
-        # epoch = loaded_dict['saved_epoch']
-        modulation = loaded_dict['modulation']
-        # alpha = loaded_dict['alpha']
         fusion = loaded_dict['fusion']
         state_dict = loaded_dict['model']
-        # optimizer_dict = loaded_dict['optimizer']
-        # scheduler = loaded_dict['scheduler']
 
-        assert modulation == args.modulation, 'inconsistency between modulation method of loaded model and args !'
         assert fusion == args.fusion_method, 'inconsistency between fusion method of loaded model and args !'
 
         model = model.load_state_dict(state_dict)
