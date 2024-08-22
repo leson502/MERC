@@ -6,10 +6,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import f1_score, classification_report
 import pdb
+import copy
 
-from dataset.CramedDataset import CramedDataset
+from dataset.CramedDataset import load_cremad
 from dataset.VGGSoundDataset import VGGSound
 from dataset.dataset import AVDataset
 from models.basic_model import AVClassifier
@@ -79,26 +80,20 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler, wr
     return _loss / len(dataloader)
 
 
-def valid(args, model, device, dataloader):
+def eval(args, model, device, dataloader, test=False):
     softmax = nn.Softmax(dim=1)
 
-    if args.dataset == 'VGGSound':
-        n_classes = 309
-    elif args.dataset == 'KineticSound':
-        n_classes = 31
-    elif args.dataset == 'CREMAD':
+    if args.dataset == 'CREMAD':
         n_classes = 6
-    elif args.dataset == 'AVE':
-        n_classes = 28
     else:
         raise NotImplementedError('Incorrect dataset name {}'.format(args.dataset))
 
     with torch.no_grad():
         model.eval()
-        # TODO: more flexible
-        num = [0.0 for _ in range(n_classes)]
-        acc = [0.0 for _ in range(n_classes)]
-
+        criterion = nn.CrossEntropyLoss()
+        _loss = 0
+        golds = []
+        preds = []
         for step, (spec, image, label) in enumerate(dataloader):
 
             spec = spec.to(device)
@@ -107,18 +102,19 @@ def valid(args, model, device, dataloader):
 
             a, v, out = model(spec.unsqueeze(1).float(), image.float())
 
-            prediction = softmax(out)
 
-            for i in range(image.shape[0]):
+            loss = criterion(out, label)
+            _loss += loss.item()
 
-                ma = np.argmax(prediction[i].cpu().data.numpy())
-                num[label[i]] += 1.0
+            y_hat = torch.argmax(softmax(out), dim=-1)
+            golds.extend(label.cpu().numpy())
+            preds.extend(y_hat.cpu().numpy())
 
-                #pdb.set_trace()
-                if np.asarray(label[i].cpu()) == ma:
-                    acc[label[i]] += 1.0
-
-    return sum(acc) / sum(num)
+        wf1 = f1_score(golds, preds, average='weighted')
+        
+        if test:
+            print(classification_report(golds, preds))
+    return _loss / len(dataloader), wf1
 
 
 def main():
@@ -137,71 +133,65 @@ def main():
     scheduler = optim.lr_scheduler.StepLR(optimizer, args.lr_decay_step, args.lr_decay_ratio)
 
     if args.dataset == 'CREMAD':
-        train_dataset = CramedDataset(args, mode='train')
-        test_dataset = CramedDataset(args, mode='test')
+        train_dataset, dev_dataset, test_dataset = load_cremad(args)
     else:
-        raise NotImplementedError('Incorrect dataset name {}! '
-                                  'Only support VGGSound, KineticSound and CREMA-D for now!'.format(args.dataset))
+        raise NotImplementedError('Incorrect dataset name {}'.format(args.dataset))
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size,
                                   shuffle=True, pin_memory=True)
+
+    dev_dataloader = DataLoader(dev_dataset, batch_size=args.batch_size,
+                                shuffle=False, pin_memory=True)
 
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size,
                                  shuffle=False, pin_memory=True)
 
     if args.train:
 
-        best_acc = 0.0
+        best_dev_f1 = 0.0
+        best_state = None
+        best_epoch = 0
 
         for epoch in range(args.epochs):
+            batch_loss= train_epoch(args, epoch, model, device,
+                                        train_dataloader, optimizer, scheduler)
+            loss, f1 = eval(args, model, device, dev_dataloader)
+        
+            print('Epoch: {}, Train Loss: {}, Dev Loss: {}, F1: {}'.format(epoch, batch_loss, loss, f1))
 
-            if args.use_tensorboard:
+            if f1 > best_dev_f1:
+                best_dev_f1 = f1
+                best_state = best_state = copy.deepcopy(model.state_dict())
+                best_epoch = epoch
+        
+        # Best state
+        model.load_state_dict(best_state)
+        print('Best model loaded at epoch {} with dev F1: {}'.format(best_epoch, best_dev_f1))
+        print("Start testing on test dataset ...")
+        _, f1 = eval(args, model, device, test_dataloader, test=True)
+        if not os.path.exists(args.ckpt_path):
+            os.mkdir(args.ckpt_path)
 
-                writer_path = os.path.join(args.tensorboard_path, args.dataset)
-                if not os.path.exists(writer_path):
-                    os.mkdir(writer_path)
-                log_name = '{}_{}'.format(args.fusion_method, args.modulation)
-                writer = SummaryWriter(os.path.join(writer_path, log_name))
+        model_name = 'best_model_of_dataset_{}_' \
+                        'optimizer_{}_' \
+                        'epoch_{}_f1_{}.pth'.format(args.dataset,
+                                                    args.optimizer,
+                                                    epoch, f1)
 
-                batch_loss = train_epoch(args, epoch, model, device,
-                                                                     train_dataloader, optimizer, scheduler)
-                acc= valid(args, model, device, test_dataloader)
+        saved_dict = {'saved_epoch': epoch,
+                        'fusion': args.fusion_method,
+                        'f1': f1,
+                        'model': model.state_dict(),
+                        'optimizer': optimizer.state_dict(),
+                        'scheduler': scheduler.state_dict()}
 
-                writer.add_scalars('Loss', {'Total Loss': batch_loss}, epoch)
+        save_dir = os.path.join(args.ckpt_path, model_name)
 
-                writer.add_scalars('Evaluation', {'Total Accuracy': acc}, epoch)
+        torch.save(saved_dict, save_dir)
+        print('The best model has been saved at {}.'.format(save_dir))
 
-            else:
-                batch_loss= train_epoch(args, epoch, model, device,
-                                                                     train_dataloader, optimizer, scheduler)
-                acc = valid(args, model, device, test_dataloader)
+                
 
-            if acc > best_acc:
-                best_acc = float(acc)
-
-                if not os.path.exists(args.ckpt_path):
-                    os.mkdir(args.ckpt_path)
-
-                model_name = 'best_model_of_dataset_{}_' \
-                             'optimizer_{}_' \
-                             'epoch_{}_acc_{}.pth'.format(args.dataset,
-                                                          args.optimizer,
-                                                          epoch, acc)
-
-                saved_dict = {'saved_epoch': epoch,
-                              'fusion': args.fusion_method,
-                              'acc': acc,
-                              'model': model.state_dict(),
-                              'optimizer': optimizer.state_dict(),
-                              'scheduler': scheduler.state_dict()}
-
-                save_dir = os.path.join(args.ckpt_path, model_name)
-
-                torch.save(saved_dict, save_dir)
-                print('The best model has been saved at {}.'.format(save_dir))
-                print("Loss: {:.3f}, Acc: {:.3f}".format(batch_loss, acc))
-            else:
-                print("Loss: {:.3f}, Acc: {:.3f}, Best Acc: {:.3f}".format(batch_loss, acc, best_acc))
     else:
         loaded_dict = torch.load(args.ckpt_path)
         fusion = loaded_dict['fusion']
@@ -210,10 +200,10 @@ def main():
         assert fusion == args.fusion_method, 'inconsistency between fusion method of loaded model and args !'
 
         model.load_state_dict(state_dict)
-        print('Trained model loaded!')
+        print('Trained model loaded! Testing ...')
 
-        acc = valid(args, model, device, test_dataloader)
-        print('Accuracy: {}'.format(acc))
+        loss, f1 = eval(args, model, device, test_dataloader, test=True)
+        
 
 
 if __name__ == "__main__":

@@ -10,42 +10,34 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 import pdb
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
 
 class CramedDataset(Dataset):
 
-    def __init__(self, args, mode='train'):
+    def __init__(self, args, data, train=True):
         self.args = args
         self.image = []
         self.audio = []
         self.label = []
-        self.mode = mode
+        self.train = train
 
-        self.data_root = './data/'
         class_dict = {'NEU':0, 'HAP':1, 'SAD':2, 'FEA':3, 'DIS':4, 'ANG':5}
 
         self.visual_feature_path = args.visual_path
         self.audio_feature_path = args.audio_path
 
-        self.train_csv = os.path.join(self.data_root, args.dataset + '/train.csv')
-        self.test_csv = os.path.join(self.data_root, args.dataset + '/test.csv')
+        for item in data:
+            audio_path = os.path.join(self.audio_feature_path, item[0] + '.wav')
+            visual_path = os.path.join(self.visual_feature_path, 'Image-{:02d}-FPS'.format(self.args.fps), item[0])
 
-        if mode == 'train':
-            csv_file = self.train_csv
-        else:
-            csv_file = self.test_csv
-
-        with open(csv_file, encoding='UTF-8-sig') as f2:
-            csv_reader = csv.reader(f2)
-            for item in csv_reader:
-                audio_path = os.path.join(self.audio_feature_path, item[0] + '.wav')
-                visual_path = os.path.join(self.visual_feature_path, 'Image-{:02d}-FPS'.format(self.args.fps), item[0])
-
-                if os.path.exists(audio_path) and os.path.exists(visual_path):
-                    self.image.append(visual_path)
-                    self.audio.append(audio_path)
-                    self.label.append(class_dict[item[1]])
-                else:
-                    continue
+            if os.path.exists(audio_path) and os.path.exists(visual_path):
+                self.image.append(visual_path)
+                self.audio.append(audio_path)
+                self.label.append(class_dict[item[1]])
+            else:
+                continue
 
 
     def __len__(self):
@@ -65,7 +57,7 @@ class CramedDataset(Dataset):
         #std = np.std(spectrogram)
         #spectrogram = np.divide(spectrogram - mean, std + 1e-9)
 
-        if self.mode == 'train':
+        if self.train:
             transform = transforms.Compose([
                 transforms.RandomResizedCrop(224),
                 transforms.RandomHorizontalFlip(),
@@ -95,3 +87,20 @@ class CramedDataset(Dataset):
         label = self.label[idx]
 
         return spectrogram, images, label
+
+def load_cremad(args, data_root='./data'):
+    train_csv = os.path.join(data_root, args.dataset + '/train.csv')
+    test_csv = os.path.join(data_root, args.dataset + '/test.csv')
+
+    train_df = pd.read_csv(train_csv, header=None)
+    train, dev = train_test_split(train_df, test_size=0.1)
+    test = pd.read_csv(test_csv, header=None)
+    
+    train_dataset = CramedDataset(args, train.to_numpy(), True)
+    dev_dataset = CramedDataset(args, dev.to_numpy(), False)
+    test_dataset = CramedDataset(args, test.to_numpy(), False)
+
+    return train_dataset, dev_dataset, test_dataset
+
+if __name__ == "__main__":
+    pass
