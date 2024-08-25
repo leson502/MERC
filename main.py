@@ -16,20 +16,16 @@ from dataset.dataset import AVDataset
 from models.basic_model import AVClassifier
 from utils.utils import setup_seed, weight_init
 from tqdm import tqdm
-
-
+from comet_ml import Experiment
 def get_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', default='CREMAD', type=str,
-                        help='VGGSound, KineticSound, CREMAD, AVE')
-    parser.add_argument('--modulation', default='OGM_GE', type=str,
+    parser.add_argument('--dataset', default='CREMAD', type=str)
 
-                        choices=['Normal', 'OGM', 'OGM_GE'])
     parser.add_argument('--fusion_method', default='concat', type=str,
                         choices=['sum', 'concat', 'gated', 'film'])
     parser.add_argument('--fps', default=1, type=int)
-    parser.add_argument('--audio_path', default='/home/hudi/data/CREMA-D/AudioWAV', type=str)
-    parser.add_argument('--visual_path', default='/home/hudi/data/CREMA-D/', type=str)
+    parser.add_argument('--audio_path', default='/', type=str)
+    parser.add_argument('--visual_path', default='/', type=str)
 
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=100, type=int)
@@ -42,7 +38,7 @@ def get_arguments():
     parser.add_argument('--ckpt_path', default="/ckpt", type=str, help='path to save trained models')
     parser.add_argument('--train', action='store_true', help='turn on train mode')
 
-    parser.add_argument('--use_tensorboard', default=False, type=bool, help='whether to visualize')
+    parser.add_argument('--comet', default=False, type=bool, help='whether to visualize')
     parser.add_argument('--tensorboard_path', type=str, help='path to save tensorboard logs')
 
     parser.add_argument('--random_seed', default=0, type=int)
@@ -57,7 +53,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler, wr
 
     _loss = 0
 
-    for step, (spec, image, label) in tqdm(enumerate(dataloader), desc='Epoch: {}: '.format(epoch)):
+    for step, (spec, image, label) in (pbar := tqdm(enumerate(dataloader), desc='Epoch: {}: '.format(epoch))):
         #pdb.set_trace()
         spec = spec.to(device)
         image = image.to(device)
@@ -72,6 +68,7 @@ def train_epoch(args, epoch, model, device, dataloader, optimizer, scheduler, wr
         loss.backward()
 
         optimizer.step()
+        pbar.set_description('Epoch: {} Loss: {:.4f}'.format(epoch, loss.item()))
 
         _loss += loss.item()
 
@@ -147,7 +144,6 @@ def main():
                                  shuffle=False, pin_memory=True)
 
     if args.train:
-
         best_dev_f1 = 0.0
         best_state = None
         best_epoch = 0

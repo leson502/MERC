@@ -133,4 +133,6 @@ dmypy.json
 *.pt
 
 CREMA-D.zip
+cremad.zip
 dataroot/
+run.sh
